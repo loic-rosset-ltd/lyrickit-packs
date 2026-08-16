@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "language": "en",
+      "revision": 1,
+      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/en-1.dma",
+      "bytes": 9505682,
+      "seed": "lyrickit-pack-seed-v1-published-with-the-licence",
+      "displayName": "English — WordNet 3.1",
+      "headwords": 147478,
+      "licence": "WordNet 3.1 License",
+      "licenceURL": "https://raw.githubusercontent.com/loic-rosset-ltd/lyrickit-packs/main/LICENSE-WordNet-3.1.txt"
+    },
+    {
+      "language": "fr",
+      "revision": 1,
+      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/fr-1.dma",
+      "bytes": 97116387,
+      "seed": "lyrickit-pack-seed-v1-published-with-the-licence",
+      "displayName": "Français — Wiktionnaire",
+      "headwords": 1931709,
+      "licence": "CC BY-SA 3.0",
+      "licenceURL": "https://raw.githubusercontent.com/loic-rosset-ltd/lyrickit-packs/main/LICENSE-CC-BY-SA-3.0.txt"
+    }
+  ]
+}
