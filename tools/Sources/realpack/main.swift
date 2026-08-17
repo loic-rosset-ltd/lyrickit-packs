@@ -96,6 +96,312 @@ func measure(_ path: String, _ language: Language) throws {
     }
 }
 
+// MARK: - resort
+//
+// realpack resort <in.dma> <out.dma>
+//
+// Reads a pack and writes the same pack with every rhyme bucket already in rank
+// order, declaring it in `/meta.json` as `rhymeOrder: rank`. That declaration is
+// what lets the reader decode a bucket a chunk at a time and stop, instead of
+// decoding 206,164 lines to answer with ninety.
+//
+// ⚠️ **It does not need the source payload.** A v1 `.dma` carries every field the
+// rank order is computed from, so re-cutting is a transformation of the pack
+// rather than a rebuild from the 3.17 GB Wiktionary dump — which is the whole
+// reason a revision like this is affordable at all.
+//
+// The sort is *exactly* the one `DictionaryPack` applies to an unsorted bucket:
+// rank ascending, unranked last, ties in the order the lines were already in.
+// Reproducing it rather than inventing a better one is the point — a v2 pack must
+// answer identically to the v1 it came from, or the revision is a behaviour change
+// wearing a performance change's clothes.
+
+if mode == "resort" {
+    guard args.count >= 4 else { fatalError("usage: realpack resort <in.dma> <out.dma>") }
+    let inURL = URL(fileURLWithPath: args[2]), outURL = URL(fileURLWithPath: args[3])
+    let source = try DMAVolume.open(url: inURL,
+                                    keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
+    let inSize = (try FileManager.default.attributesOfItem(atPath: args[2])[.size] as? Int) ?? 0
+    print("SOURCE \(args[2])  \(mib(inSize))  \(source.items.count) entries")
+
+    let newline = UInt8(ascii: "\n")
+    var entries: [DMAEntry] = []
+    var rhymeBuckets = 0, rhymeLines = 0, movedLines = 0
+    let started = Date()
+
+    for item in source.items {
+        let path = item.originalPath
+        let body = try source.read(path: path).data
+
+        var payload = body
+        if path == PackFormat.metaPath {
+            // Decoded and re-encoded through `PackMeta`, so the new pack cannot
+            // claim a headword count or a bucket width the old one did not.
+            var meta = try JSONDecoder().decode(PackMeta.self, from: body)
+            meta.rhymeOrder = .rank
+            payload = try JSONEncoder().encode(meta)
+            print("  meta: language \(meta.language) headwords \(meta.headwords) "
+                  + "width \(meta.bucketWidth) → rhymeOrder \(meta.rhymeOrder.rawValue)")
+        } else if path.hasPrefix("/rhyme/") {
+            let bytes = [UInt8](body)
+            // Kept as byte ranges rather than `String`s: the biggest French
+            // bucket is six megabytes, and the whole index is a hundred.
+            var lines: [(rank: Int, order: Int, range: Range<Int>)] = []
+            var i = bytes.startIndex
+            while i < bytes.endIndex {
+                let end = bytes[i...].firstIndex(of: newline) ?? bytes.endIndex
+                if end > i {
+                    let rank = PackFormat.parseRhymeLine(bytes[i..<end])?.rank ?? Int.max
+                    lines.append((rank, lines.count, i..<end))
+                }
+                i = end < bytes.endIndex ? bytes.index(after: end) : bytes.endIndex
+            }
+            lines.sort { $0.rank != $1.rank ? $0.rank < $1.rank : $0.order < $1.order }
+            var out = [UInt8](); out.reserveCapacity(bytes.count)
+            for (n, line) in lines.enumerated() {
+                if n > 0 { out.append(newline) }
+                out.append(contentsOf: bytes[line.range])
+                if line.order != n { movedLines += 1 }
+            }
+            // A bucket must not change size: same lines, same separators, only
+            // the order. If this ever trips, the walk above lost a line.
+            guard out.count == bytes.count else {
+                fatalError("\(path): re-emitted \(out.count) bytes from \(bytes.count)")
+            }
+            payload = Data(out)
+            rhymeBuckets += 1
+            rhymeLines += lines.count
+        }
+        entries.append(DMAEntry(originalPath: path, type: item.type, mode: item.mode,
+                                owner: item.owner, group: item.group,
+                                crc32: CRC32.checksum(payload), data: payload))
+    }
+    print(String(format: "  sorted %d rhyme buckets, %d lines, %d moved (%.1f%%) in %.1fs",
+                 rhymeBuckets, rhymeLines, movedLines,
+                 100 * Double(movedLines) / Double(max(rhymeLines, 1)),
+                 Date().timeIntervalSince(started)))
+
+    try? FileManager.default.removeItem(at: outURL)
+    let buildStart = Date()
+    _ = try DMAVolume.create(url: outURL,
+                             keyProvider: EmbeddedSecretKeyProvider(secret: SEED),
+                             motd: source.motd,
+                             readme: "Dictionary pack.",
+                             metadata: source.metadata,
+                             entries: entries, compression: .lzma)
+    let outSize = (try FileManager.default.attributesOfItem(atPath: args[3])[.size] as? Int) ?? 0
+    print(String(format: "wrote %@  %@  (%d bytes) in %.1fs",
+                 args[3], mib(outSize), outSize, Date().timeIntervalSince(buildStart)))
+    exit(0)
+}
+
+// MARK: - compare
+//
+// realpack compare <a.dma> <b.dma> <en|fr> <word> [word…]
+//
+// Asks two packs the same questions and compares the answers word for word.
+//
+// A pack revision that reorders anything has to prove it did not *change*
+// anything, and the reasoning that says it cannot — the on-disk sort is the same
+// ordering the reader applies to an unsorted bucket — is an argument. This is the
+// measurement. It compares the full candidate list as well as the ranked answer,
+// because the two can differ for different reasons: the first catches a lost or
+// duplicated line, the second catches an ordering that is subtly not stable.
+
+if mode == "compare" {
+    guard args.count >= 6 else {
+        fatalError("usage: realpack compare <a.dma> <b.dma> <en|fr> <word> [word…]")
+    }
+    let language: Language = args[4] == "fr" ? .french : .english
+    let a = try DictionaryPack(url: URL(fileURLWithPath: args[2]),
+                               language: PackLanguage(language), seed: SEED)
+    let b = try DictionaryPack(url: URL(fileURLWithPath: args[3]),
+                               language: PackLanguage(language), seed: SEED)
+    print("A \(args[2])  headwords \(a.headwordCount)  width \(a.bucketWidth)")
+    print("B \(args[3])  headwords \(b.headwordCount)  width \(b.bucketWidth)")
+
+    var failures = 0
+    for probe in args[5...] {
+        let tail = Rhyme.tail(Phonetics.phonemes(probe, language))
+        let ca = a.rhymeCandidates(tail: tail).map(\.word)
+        let cb = b.rhymeCandidates(tail: tail).map(\.word)
+        let sameBucket = ca == cb
+
+        var qa = RhymeQuery(); qa.source = PackCandidates(packs: [language: a]); qa.limit = 90
+        var qb = RhymeQuery(); qb.source = PackCandidates(packs: [language: b]); qb.limit = 90
+        let ha = RhymeSearch.find(probe, language, qa)
+        let hb = RhymeSearch.find(probe, language, qb)
+        let sameHits = ha == hb
+
+        // And the same definition, since resorting rewrites every block in the
+        // archive and a pass-through that quietly dropped one would look fine
+        // from the rhyme side alone.
+        let sameDefinition = a.define(probe)?.allGlosses == b.define(probe)?.allGlosses
+
+        if !(sameBucket && sameHits && sameDefinition) { failures += 1 }
+        print(String(format: "%-12@ bucket %@ (%d)   hits %@ (%d)   define %@",
+                     probe as NSString,
+                     sameBucket ? "SAME" : "*** DIFFERS ***", ca.count,
+                     sameHits ? "SAME" : "*** DIFFERS ***", ha.count,
+                     sameDefinition ? "SAME" : "*** DIFFERS ***"))
+        if !sameHits {
+            print("      A: " + ha.prefix(12).map(\.word).joined(separator: " "))
+            print("      B: " + hb.prefix(12).map(\.word).joined(separator: " "))
+        }
+        if !sameBucket, let i = zip(ca, cb).enumerated().first(where: { $0.element.0 != $0.element.1 }) {
+            print("      first divergence at \(i.offset): A=\(i.element.0) B=\(i.element.1)")
+        }
+    }
+    print(failures == 0 ? "\nALL IDENTICAL" : "\n\(failures) DIFFER")
+    exit(failures == 0 ? 0 : 1)
+}
+
+// MARK: - first
+//
+// realpack first <pack.dma> <en|fr> <word> [word…]
+//
+// The cost a writer actually waits for: the **first** query on a rhyme ending, on
+// a pack nobody has touched. `panel` cannot report this — it reads the bucket to
+// count candidates before it times the search, so its "cold" number is warm. Here
+// every probe gets a freshly opened pack and `RhymeSearch.find` is the first thing
+// asked of it.
+//
+// The block read is timed separately, on another fresh pack, because it is the
+// floor: it is the lzma inflate of the bucket and no ordering can remove it. The
+// gap between the two columns is the decode, and the decode is what a pre-sorted
+// pack lets the reader skip.
+
+if mode == "first" {
+    guard args.count >= 5 else { fatalError("usage: realpack first <pack.dma> <en|fr> <word> [word…]") }
+    let language: Language = args[3] == "fr" ? .french : .english
+    let url = URL(fileURLWithPath: args[2])
+
+    func ms(_ body: () -> Void) -> Double {
+        let t = DispatchTime.now().uptimeNanoseconds
+        body()
+        return Double(DispatchTime.now().uptimeNanoseconds - t) / 1_000_000
+    }
+
+    print("word           find(cold)   blockRead   decode    candidates  hits")
+    for probe in args[4...] {
+        let tail = Rhyme.tail(Phonetics.phonemes(probe, language))
+
+        let a = try DictionaryPack(url: url, language: PackLanguage(language), seed: SEED)
+        var q = RhymeQuery(); q.source = PackCandidates(packs: [language: a]); q.limit = 90
+        var hits = 0
+        let find = ms { hits = RhymeSearch.find(probe, language, q).count }
+
+        // A second untouched pack, so the read is not measured against a cache
+        // the search above has already filled.
+        let volume = try DMAVolume.open(url: url,
+                                        keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
+        var readBytes = 0
+        let read = ms { readBytes = ((try? volume.read(path: PackFormat.rhymePath(tail: tail)))?.data.count) ?? 0 }
+
+        let c = try DictionaryPack(url: url, language: PackLanguage(language), seed: SEED)
+        let candidates = c.rhymeCandidates(tail: tail).count
+        print(String(format: "%-12@ %10.1f  %10.1f  %7.1f   %10d  %4d   (%@ bucket)",
+                     probe as NSString, find, read, max(find - read, 0), candidates, hits,
+                     mib(readBytes)))
+    }
+    exit(0)
+}
+
+// MARK: - panel
+//
+// realpack panel <pack.dma> <en|fr> <word> [word…]
+//
+// Times exactly what the lookup panel does per caret move — `define`, then
+// `RhymeSearch.find` at the panel's limit — and splits the rhyme cost into the
+// bucket read and the rank, because they are different problems with different
+// fixes. Cold and warm are both reported: over a writing session the second
+// question about a bucket is the common case, not the first.
+
+// realpack verify <pack.dma> <en|fr> <word> [word…]
+//
+// Runs each query twice over the *same* pack — once with the rank-order
+// short-circuit and once forced exhaustive — and compares the answers word for
+// word. The short-circuit is an argument about a sort key, and an argument is
+// not a measurement: this is the measurement.
+struct Exhaustive: RhymeCandidateSource {
+    let inner: PackCandidates
+    func candidates(tail: [String], language: Language) -> [RhymeCandidate] {
+        inner.candidates(tail: tail, language: language)
+    }
+    /// The whole point: same words, same order, promise withheld.
+    var isRankOrdered: Bool { false }
+}
+
+if mode == "verify" {
+    guard args.count >= 5 else { fatalError("usage: realpack verify <pack.dma> <en|fr> <word> [word…]") }
+    let language: Language = args[3] == "fr" ? .french : .english
+    let pack = try DictionaryPack(url: URL(fileURLWithPath: args[2]),
+                                  language: PackLanguage(language), seed: SEED)
+    let fast = PackCandidates(packs: [language: pack])
+    let slow = Exhaustive(inner: fast)
+
+    func ms(_ body: () -> Void) -> Double {
+        let t = DispatchTime.now().uptimeNanoseconds
+        body()
+        return Double(DispatchTime.now().uptimeNanoseconds - t) / 1_000_000
+    }
+
+    var failures = 0
+    for probe in args[4...] {
+        var a: [RhymeHit] = [], b: [RhymeHit] = []
+        var qa = RhymeQuery(); qa.source = fast; qa.limit = 90
+        var qb = RhymeQuery(); qb.source = slow; qb.limit = 90
+        // Warm the bucket first so neither run pays the parse, and time the
+        // second call of each — the panel's common case.
+        _ = RhymeSearch.find(probe, language, qb)
+        let tb = ms { b = RhymeSearch.find(probe, language, qb) }
+        let ta = ms { a = RhymeSearch.find(probe, language, qa) }
+        let same = a.map(\.word) == b.map(\.word)
+        if !same { failures += 1 }
+        print(String(format: "%-12@ %@  short-circuit %6.1f ms   exhaustive %7.1f ms   %4.1f× ",
+                     probe as NSString, same ? "IDENTICAL" : "*** DIFFERS ***", ta, tb,
+                     tb / max(ta, 0.001)) + "(\(a.count) hits)")
+        if !same {
+            print("      fast: " + a.prefix(12).map(\.word).joined(separator: " "))
+            print("      slow: " + b.prefix(12).map(\.word).joined(separator: " "))
+        }
+    }
+    print(failures == 0 ? "\nALL IDENTICAL" : "\n\(failures) DIFFER")
+    exit(failures == 0 ? 0 : 1)
+}
+
+if mode == "panel" {
+    guard args.count >= 5 else { fatalError("usage: realpack panel <pack.dma> <en|fr> <word> [word…]") }
+    let language: Language = args[3] == "fr" ? .french : .english
+    let probes = Array(args[4...])
+    let pack = try DictionaryPack(url: URL(fileURLWithPath: args[2]),
+                                  language: PackLanguage(language), seed: SEED)
+    let source = PackCandidates(packs: [language: pack])
+
+    func ms(_ body: () -> Void) -> Double {
+        let t = DispatchTime.now().uptimeNanoseconds
+        body()
+        return Double(DispatchTime.now().uptimeNanoseconds - t) / 1_000_000
+    }
+
+    print("word          define   rhymeCold  (bucket)   rhymeWarm   candidates  hits")
+    for probe in probes {
+        var entry: PackEntry?
+        let d = ms { entry = pack.define(probe) }
+        let tail = Rhyme.tail(Phonetics.phonemes(probe, language))
+        var candidates = 0
+        let bucket = ms { candidates = pack.rhymeCandidates(tail: tail).count }
+        var q = RhymeQuery(); q.source = source; q.limit = 90
+        var hits = 0
+        let cold = ms { hits = RhymeSearch.find(probe, language, q).count }
+        let warm = ms { _ = RhymeSearch.find(probe, language, q) }
+        print(String(format: "%-12@ %7.1f   %8.1f  %8.1f   %9.1f   %10d  %4d",
+                     probe as NSString, d, cold, bucket, warm, candidates, hits)
+              + (entry == nil ? "  [no def]" : ""))
+    }
+    exit(0)
+}
+
 // MARK: - rhymes
 //
 // Prints what a query *returns*, not how fast it returns it — the open product
@@ -245,18 +551,39 @@ var headwords = 0
 var defBytes = 0, rhymeBytes = 0
 var rankedRows = 0
 
+/// Streams a file line by line through `getline`, which grows its own buffer, so
+/// a 516 MB payload is never held as a `String`.
+///
+/// This replaces `freopen(inPath, "r", stdin)` + `readLine()`, which worked but
+/// reached the file by redirecting the process's own standard input. Opening the
+/// path directly is the same streaming without the global side effect — and it
+/// makes the `guard` below the only thing standing between a misread input and a
+/// pack of nothing, rather than one of two.
+func forEachLine(of path: String, _ body: (String) -> Void) {
+    guard let file = fopen(path, "r") else { fatalError("cannot open \(path)") }
+    defer { fclose(file) }
+    var buffer: UnsafeMutablePointer<CChar>?
+    var capacity = 0
+    defer { free(buffer) }
+    while true {
+        let read = getline(&buffer, &capacity, file)
+        guard read > 0, let buffer else { break }
+        var length = Int(read)
+        while length > 0, buffer[length - 1] == 0x0A || buffer[length - 1] == 0x0D { length -= 1 }
+        body(String(decoding: UnsafeRawBufferPointer(start: buffer, count: length), as: UTF8.self))
+    }
+}
+
 let started = Date()
-guard let file = freopen(inPath, "r", stdin) else { fatalError("cannot open \(inPath)") }
-_ = file
-while let line = readLine(strippingNewline: true) {
+forEachLine(of: inPath) { line in
     guard let dRange = line.range(of: "\"w\":\""),
-          let end = line[dRange.upperBound...].firstIndex(of: "\"") else { continue }
+          let end = line[dRange.upperBound...].firstIndex(of: "\"") else { return }
     let word = PackFormat.normalise(String(line[dRange.upperBound..<end]))
     headwords += 1
     definitions[PackFormat.bucket(word, width: width), default: []].append(line)
 
     let phonemes = Phonetics.phonemes(word, language)
-    guard !phonemes.isEmpty else { continue }
+    guard !phonemes.isEmpty else { return }
     let rank = frequency[word]
     if rank != nil { rankedRows += 1 }
     rhymes[PackFormat.rhymePath(tail: Rhyme.tail(phonemes)), default: []].append(
@@ -265,6 +592,10 @@ while let line = readLine(strippingNewline: true) {
                              rank: rank))
 }
 let parsed = Date().timeIntervalSince(started)
+// ⚠️ An empty pack builds perfectly and reports success in 0.0s, which is how a
+// silently unread input file looks from here. Nothing downstream would notice
+// until an app found the dictionary answering nothing.
+guard headwords > 0 else { fatalError("read 0 headwords from \(inPath) — nothing to build") }
 print("parsed \(headwords) headwords in \(String(format: "%.1f", parsed))s at width \(width) — \(definitions.count) define buckets, \(rhymes.count) rhyme buckets, \(definitions.count + rhymes.count + 1) blocks")
 if !frequency.isEmpty {
     // How much of the index a writer's own vocabulary actually covers. A low
@@ -285,8 +616,24 @@ func add(_ path: String, _ body: Data) {
                             owner: "lyrickit", group: "lyrickit",
                             crc32: CRC32.checksum(body), data: body))
 }
+// ⚠️ A pack built from source must be sorted here, or a rebuild silently
+// publishes a revision that has lost the pre-sorting and says nothing about it —
+// the reader would simply go back to decoding whole buckets. The order is the one
+// `resort` produces and the one `DictionaryPack` applies to an unsorted bucket:
+// rank ascending, unranked last, ties where the builder emitted them.
+for (path, lines) in rhymes {
+    rhymes[path] = lines.enumerated()
+        .sorted { a, b in
+            let ra = PackFormat.parseRhymeLine(ArraySlice(Array(a.element.utf8)))?.rank ?? Int.max
+            let rb = PackFormat.parseRhymeLine(ArraySlice(Array(b.element.utf8)))?.rank ?? Int.max
+            return ra != rb ? ra < rb : a.offset < b.offset
+        }
+        .map(\.element)
+}
+
 add(PackFormat.metaPath, try JSONEncoder().encode(
-    PackMeta(language: args[4], headwords: headwords, bucketWidth: width)))
+    PackMeta(language: args[4], headwords: headwords, bucketWidth: width,
+             rhymeOrder: .rank)))
 for (b, lines) in definitions.sorted(by: { $0.key < $1.key }) {
     let body = Data(lines.joined(separator: "\n").utf8)
     defBytes += body.count

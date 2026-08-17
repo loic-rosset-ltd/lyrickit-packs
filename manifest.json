@@ -3,9 +3,9 @@
   "packs": [
     {
       "language": "en",
-      "revision": 1,
-      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/en-1.dma",
-      "bytes": 9505682,
+      "revision": 2,
+      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/en-2.dma",
+      "bytes": 9497278,
       "seed": "lyrickit-pack-seed-v1-published-with-the-licence",
       "displayName": "English — WordNet 3.1",
       "headwords": 147478,
@@ -14,9 +14,9 @@
     },
     {
       "language": "fr",
-      "revision": 1,
-      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/fr-1.dma",
-      "bytes": 97116387,
+      "revision": 2,
+      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/fr-2.dma",
+      "bytes": 97174119,
       "seed": "lyrickit-pack-seed-v1-published-with-the-licence",
       "displayName": "Français — Wiktionnaire",
       "headwords": 1931709,

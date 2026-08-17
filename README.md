@@ -6,13 +6,42 @@ format, published as a release asset and resolved through [`manifest.json`](mani
 
 | pack | source | headwords | size | licence |
 | --- | --- | --- | --- | --- |
-| [`en-1.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/en-1.dma) | WordNet 3.1 | 147,478 | 9,505,682 B (9.1 MB) | [WordNet 3.1](LICENSE-WordNet-3.1.txt) |
-| [`fr-1.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v1/fr-1.dma) | French Wiktionary (Wiktionnaire), via [kaikki.org](https://kaikki.org/) | 1,931,709 | 97,116,387 B (92.6 MB) | [CC BY-SA 3.0](LICENSE-CC-BY-SA-3.0.txt) |
+| [`en-2.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/en-2.dma) | WordNet 3.1 | 147,478 | 9,497,278 B (9.1 MB) | [WordNet 3.1](LICENSE-WordNet-3.1.txt) |
+| [`fr-2.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/fr-2.dma) | French Wiktionary (Wiktionnaire), via [kaikki.org](https://kaikki.org/) | 1,931,709 | 97,174,119 B (92.7 MB) | [CC BY-SA 3.0](LICENSE-CC-BY-SA-3.0.txt) |
 
 ```
-SHA-256  75bc2fd45243d1b2a9b1d48e44c677f5497bb44e0103be7ddd9e829a14ee6c37  en-1.dma
-SHA-256  9233424b55cfef9d07e476ce888da75c33797154583a53eaf91f11c0e840c7a7  fr-1.dma
+SHA-256  42e27b7a423d20cb47f5f0bff540f215983081b5c6beb443247ea49a96f5ee69  en-2.dma
+SHA-256  7099135ec72d2615efc31ad4d207deb3574b0d4fca2c06d92218416318891876  fr-2.dma
 ```
+
+## What changed in revision 2
+
+The dictionaries did not. Same headwords, same senses, same phonetics, same
+frequency ranks — **every rhyme bucket is simply written in rank order now**, and
+`/meta.json` says so with `"rhymeOrder": "rank"`.
+
+That declaration is worth a revision because of what a reader can do with it. A
+rhyme query wants the best ninety of a bucket that can hold 206,164 words, and the
+ranked words are exactly the ones a writer will be offered — so a reader given the
+promise can decode a thousand lines and stop, instead of decoding all of them to
+build an array. Measured on the French pack, the **first** query on a common
+ending falls from ~480 ms to ~135 ms, and what remains is the lzma inflate of the
+block, which is a floor no ordering can move.
+
+Two properties this revision was checked against, rather than reasoned into:
+
+- **The answers are identical.** The on-disk order is the same ordering a reader
+  has always applied to an unsorted bucket. Thirty words across both languages
+  return the same candidate set, the same ranked hits and the same definitions
+  from revision 1 and revision 2.
+- **Older apps keep working.** `rhymeOrder` is a new optional field and not a
+  layout change — the line format, the paths and the bucketing are untouched, so
+  `layoutVersion` is still `1`. A build that has never heard of the field ignores
+  it and sorts the bucket as it always did; run against the previously shipping
+  reader over 58 words, hits and definitions were identical throughout. A pack
+  and an app can be updated in either order.
+
+Revision 1 remains downloadable at [its release](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/tag/v1).
 
 ## The decryption seed is published, deliberately
 
@@ -58,10 +87,18 @@ filtered out of a pack by them.
 A DMA volume with three regions:
 
 ```
-/meta.json              language, revision, bucket width
+/meta.json              language, revision, bucket width, rhyme order
 /define/<n letters>.jsonl   one JSON record per headword
 /rhyme/<tail>.txt           word ⇥ phonemes ⇥ syllables ⇥ rank
 ```
+
+`rank` is optional per line and absent far more often than not — a 50k frequency
+list cannot name a two-million-headword dictionary's inflected forms, and a line
+without one reads as "unknown" and sorts last. `rhymeOrder` in `/meta.json` says
+whether the lines in a `/rhyme/` file are already ordered by it (`rank`) or say
+nothing (`unspecified`, which is what every revision 1 pack is, and what an absent
+field means). A reader must treat an order it does not recognise as
+`unspecified`: an order you cannot name is an order you cannot rely on.
 
 Definitions are bucketed by the first *n* letters of the normalised headword,
 where *n* is `bucketWidth` in `/meta.json` — **2 for English, 3 for French**.
@@ -97,7 +134,7 @@ occupies 3.17 GB of disk:
 curl -s --compressed https://kaikki.org/frwiktionary/Français/kaikki.org-dictionary-Français.jsonl \
   | python3 tools/fr_complete.py fr_all.tsv
 LC_ALL=C sort -t$'\t' -k1,1 -S 2G fr_all.tsv | python3 tools/fr_merge.py fr_complete.jsonl
-realpack build fr_complete.jsonl fr-2.dma fr 3 fr_50k.txt
+realpack build fr_complete.jsonl fr-3.dma fr 3 fr_50k.txt
 ```
 
 `LC_ALL=C` is not decoration: `fr_merge.py` groups only *adjacent* rows, so a
@@ -112,23 +149,53 @@ English is small enough to group in memory, so it is one step:
 ```sh
 curl -sL -O https://wordnetcode.princeton.edu/wn3.1.dict.tar.gz && tar xzf wn3.1.dict.tar.gz
 python3 tools/wn_complete.py dict en_complete.jsonl
-realpack build en_complete.jsonl en-2.dma en 2 en_50k.txt
+realpack build en_complete.jsonl en-3.dma en 2 en_50k.txt
 ```
 
 A French build takes about eight minutes and peaks around 2.3 GB RSS, because
 `DMAVolume.create` assembles the whole archive in memory before writing it
 atomically.
 
+## A revision that only reorders needs no source data
+
+Revision 2 was produced from revision 1, not rebuilt from Wiktionary:
+
+```sh
+realpack resort fr-1.dma fr-2.dma
+```
+
+A `.dma` already carries every field the rank order is computed from, so
+re-cutting is a transformation of the pack rather than a re-run of the 3.17 GB
+pipeline above — twenty seconds of sorting and four minutes of writing the
+archive, against eight minutes and a download. `resort` re-emits every block
+unchanged except the `/rhyme/` files, which it stably sorts by rank, and
+`/meta.json`, which it decodes through the pack's own type so the new file cannot
+claim a headword count the old one did not.
+
+Prove a reordering revision before publishing it, with both packs in hand:
+
+```sh
+realpack compare fr-1.dma fr-2.dma fr jamais chanter aimer toi nuit amour temps
+realpack first   fr-2.dma fr jamais chanter toi          # what the change bought
+```
+
+`compare` asks two packs the same questions and checks the candidate set, the
+ranked hits *and* the definitions, because those fail for different reasons: the
+first catches a lost or duplicated line, the second an ordering that is subtly not
+stable, the third a block that did not survive the pass-through.
+
 ## Publishing a new revision
 
-1. Build the pack and record its **exact byte count**. A consumer checks the
-   size before opening the archive, so a truncated download is caught as a
+1. Build or resort the pack and record its **exact byte count**. A consumer checks
+   the size before opening the archive, so a truncated download is caught as a
    truncation rather than surfacing later as a word that mysteriously has no
    definition.
-2. Upload it as a release asset named `<lang>-<revision>.dma`.
+2. Upload it as a release asset named `<lang>-<revision>.dma`. **Do this before
+   step 3** — the manifest is fetched continuously and must never name an asset
+   that is not there yet.
 3. Bump `revision` in `manifest.json` and update `url`, `bytes` and `headwords`.
    A new revision installs alongside the old one rather than overwriting it
-   mid-write.
+   mid-write; the consumer deletes the superseded file once the new one opens.
 
 The manifest is the only URL a consumer compiles in, which is what keeps hosting
 movable: publish a new manifest and the packs can live anywhere.
