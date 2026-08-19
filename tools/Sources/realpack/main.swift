@@ -195,6 +195,163 @@ if mode == "resort" {
     exit(0)
 }
 
+// MARK: - verify
+//
+// realpack verify <pack.dma> <en|fr>
+//
+// Asks the one question a published pack cannot answer about itself: **does this
+// pack still agree with the engine that reads it?**
+//
+// A pack keys its rhyme buckets on the tail computed at *build* time, so a fix
+// to the transcriber puts the two out of step silently — the editor colours
+// `grey` and `say` as a family while the lookup panel beside it offers neither
+// for the other. Nothing in either test suite can see that: the pack is data and
+// the suites test code.
+//
+// It needs no source payload. Every rhyme row carries its own headword, so the
+// tail, the count and the phonemes can all be recomputed and compared in place.
+
+if mode == "verify" {
+    guard args.count >= 4 else { fatalError("usage: realpack verify <pack.dma> <en|fr>") }
+    let language: Language = args[3] == "fr" ? .french : .english
+    let v = try DMAVolume.open(url: URL(fileURLWithPath: args[2]),
+                               keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
+    var rows = 0, movedBucket = 0, wrongSyllables = 0, wrongPhonemes = 0, nowSilent = 0
+    var examples: [String] = []
+    let started = Date()
+    for item in v.items where item.originalPath.hasPrefix("/rhyme/") {
+        let path = item.originalPath
+        let bucket = String(path.dropFirst("/rhyme/".count).dropLast(".txt".count))
+        for line in String(decoding: try v.read(path: path).data, as: UTF8.self).split(separator: "\n") {
+            guard let row = PackFormat.parseRhymeLine(ArraySlice(Array(line.utf8))) else { continue }
+            rows += 1
+            let now = Phonetics.phonemes(row.word, language)
+            if now.isEmpty { nowSilent += 1; continue }
+            let wantBucket = String(PackFormat.rhymePath(tail: Rhyme.tail(now))
+                .dropFirst("/rhyme/".count).dropLast(".txt".count))
+            let wantSyllables = Phonetics.syllables(row.word, language)
+            if wantBucket != bucket {
+                movedBucket += 1
+                if examples.count < 30 { examples.append("\(row.word): /\(bucket)/ -> /\(wantBucket)/") }
+            }
+            if wantSyllables != row.syllables { wrongSyllables += 1 }
+            if now != row.phonemes { wrongPhonemes += 1 }
+        }
+    }
+    print("PACK \(args[2])  \(rows) rhyme rows  checked in "
+          + String(format: "%.1fs", Date().timeIntervalSince(started)))
+    print("  rows whose bucket the reader would no longer ask for: \(movedBucket)")
+    print("  rows carrying a syllable count the reader disagrees with: \(wrongSyllables)")
+    print("  rows whose phonemes the reader would transcribe differently: \(wrongPhonemes)")
+    print("  rows the reader now transcribes to nothing at all: \(nowSilent)")
+    for e in examples { print("    \(e)") }
+    print(movedBucket == 0 && wrongSyllables == 0 && wrongPhonemes == 0 && nowSilent == 0
+          ? "\nPACK AGREES WITH THIS READER" : "\nPACK IS OUT OF STEP WITH THIS READER")
+    exit(movedBucket == 0 && wrongSyllables == 0 && wrongPhonemes == 0 && nowSilent == 0 ? 0 : 1)
+}
+
+// MARK: - diff
+//
+// realpack diff <a.dma> <b.dma>
+//
+// Compares two packs block for block, and the rhyme index row for row.
+//
+// `compare` asks two packs the same *questions*; this asks whether they hold the
+// same *bytes*. Both are needed and neither implies the other: a revision can
+// answer twenty probes identically while having quietly lost a bucket, and it can
+// differ in every byte of a block whose answers never changed.
+//
+// The rhyme index is diffed structurally rather than by bytes, because "this
+// block differs" is not a finding — the finding is which words moved bucket and
+// which kept a syllable count that is no longer true.
+
+if mode == "diff" {
+    guard args.count >= 4 else { fatalError("usage: realpack diff <a.dma> <b.dma>") }
+    let a = try DMAVolume.open(url: URL(fileURLWithPath: args[2]),
+                               keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
+    let b = try DMAVolume.open(url: URL(fileURLWithPath: args[3]),
+                               keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
+    print("A \(args[2])  \(a.items.count) blocks")
+    print("B \(args[3])  \(b.items.count) blocks")
+
+    let pathsA = Set(a.items.map(\.originalPath)), pathsB = Set(b.items.map(\.originalPath))
+    let onlyA = pathsA.subtracting(pathsB).sorted(), onlyB = pathsB.subtracting(pathsA).sorted()
+    print("blocks only in A: \(onlyA.count)\(onlyA.isEmpty ? "" : "  " + onlyA.prefix(12).joined(separator: " "))")
+    print("blocks only in B: \(onlyB.count)\(onlyB.isEmpty ? "" : "  " + onlyB.prefix(12).joined(separator: " "))")
+
+    /// word -> (bucket, syllables, phonemes, rank), read from every `/rhyme/` block.
+    func rhymeRows(_ v: DMAVolume, _ paths: Set<String>) throws
+        -> [String: (bucket: String, syllables: Int, phonemes: String, rank: Int?)] {
+        var rows: [String: (bucket: String, syllables: Int, phonemes: String, rank: Int?)] = [:]
+        for path in paths.sorted() where path.hasPrefix("/rhyme/") {
+            let body = try v.read(path: path).data
+            let bucket = String(path.dropFirst("/rhyme/".count).dropLast(".txt".count))
+            for line in String(decoding: body, as: UTF8.self).split(separator: "\n") {
+                guard let row = PackFormat.parseRhymeLine(ArraySlice(Array(line.utf8))) else { continue }
+                rows[row.word] = (bucket, row.syllables, row.phonemes.joined(separator: " "), row.rank)
+            }
+        }
+        return rows
+    }
+    let ra = try rhymeRows(a, pathsA), rb = try rhymeRows(b, pathsB)
+    print("rhyme rows: A \(ra.count)  B \(rb.count)")
+
+    let gone = Set(ra.keys).subtracting(rb.keys).sorted()
+    let fresh = Set(rb.keys).subtracting(ra.keys).sorted()
+    print("words only in A: \(gone.count)\(gone.isEmpty ? "" : "  " + gone.prefix(20).joined(separator: " "))")
+    print("words only in B: \(fresh.count)\(fresh.isEmpty ? "" : "  " + fresh.prefix(20).joined(separator: " "))")
+
+    var movedBucket: [(String, String, String)] = []
+    var changedSyllables: [(String, Int, Int)] = []
+    var changedPhonemesOnly: [(String, String, String)] = []
+    var changedRank = 0
+    for (word, rowA) in ra {
+        guard let rowB = rb[word] else { continue }
+        if rowA.bucket != rowB.bucket { movedBucket.append((word, rowA.bucket, rowB.bucket)) }
+        if rowA.syllables != rowB.syllables { changedSyllables.append((word, rowA.syllables, rowB.syllables)) }
+        if rowA.phonemes != rowB.phonemes, rowA.bucket == rowB.bucket, rowA.syllables == rowB.syllables {
+            changedPhonemesOnly.append((word, rowA.phonemes, rowB.phonemes))
+        }
+        if rowA.rank != rowB.rank { changedRank += 1 }
+    }
+    movedBucket.sort { $0.0 < $1.0 }
+    changedSyllables.sort { $0.0 < $1.0 }
+    changedPhonemesOnly.sort { $0.0 < $1.0 }
+    print("moved bucket:        \(movedBucket.count)")
+    let cap = args.contains("--full") ? Int.max : 40
+    for (w, x, y) in movedBucket.prefix(cap) { print("    \(w): /\(x)/ -> /\(y)/") }
+    if movedBucket.count > cap { print("    … and \(movedBucket.count - cap) more") }
+    print("changed syllables:   \(changedSyllables.count)")
+    for (w, x, y) in changedSyllables.prefix(cap) { print("    \(w): \(x) -> \(y)") }
+    if changedSyllables.count > cap { print("    … and \(changedSyllables.count - cap) more") }
+    print("changed phonemes only (same bucket, same count): \(changedPhonemesOnly.count)")
+    for (w, x, y) in changedPhonemesOnly.prefix(20) { print("    \(w): \(x) -> \(y)") }
+    print("changed rank:        \(changedRank)")
+
+    // Every non-rhyme block compared by bytes. `/define/` is the raw payload and
+    // must be identical across a content revision that only re-transcribes.
+    var differingBlocks: [String] = []
+    for path in pathsA.intersection(pathsB).sorted() where !path.hasPrefix("/rhyme/") {
+        if try a.read(path: path).data != b.read(path: path).data {
+            differingBlocks.append(path)
+            if path == PackFormat.metaPath {
+                print("    A meta: " + String(decoding: try a.read(path: path).data, as: UTF8.self))
+                print("    B meta: " + String(decoding: try b.read(path: path).data, as: UTF8.self))
+            }
+        }
+    }
+    print("non-rhyme blocks differing: \(differingBlocks.count)"
+          + (differingBlocks.isEmpty ? "" : "  " + differingBlocks.prefix(10).joined(separator: " ")))
+    // And the rhyme blocks, by bytes, so the structural diff above cannot hide a
+    // pure reordering.
+    var differingRhyme = 0
+    for path in pathsA.intersection(pathsB).sorted() where path.hasPrefix("/rhyme/") {
+        if try a.read(path: path).data != b.read(path: path).data { differingRhyme += 1 }
+    }
+    print("rhyme blocks differing by bytes: \(differingRhyme) of \(pathsA.intersection(pathsB).filter { $0.hasPrefix("/rhyme/") }.count)")
+    exit(0)
+}
+
 // MARK: - compare
 //
 // realpack compare <a.dma> <b.dma> <en|fr> <word> [word…]
