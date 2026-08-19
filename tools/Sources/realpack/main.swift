@@ -195,9 +195,17 @@ if mode == "resort" {
     exit(0)
 }
 
-// MARK: - verify
+// MARK: - conform
 //
-// realpack verify <pack.dma> <en|fr>
+// realpack conform <pack.dma> <en|fr>
+//
+// ⚠️ Named `conform`, not `verify`, because `verify` was already taken — by the
+// mode that proves the rank-order short-circuit returns the same words as an
+// exhaustive run. A second `mode == "verify"` earlier in this file does not
+// conflict at compile time; it silently makes the first one unreachable, and the
+// only symptom is a tool that used to work quietly answering a different
+// question. `conform` is also the right word: this is the conformance check for a
+// pack, the way the fixtures are one for the port.
 //
 // Asks the one question a published pack cannot answer about itself: **does this
 // pack still agree with the engine that reads it?**
@@ -211,8 +219,8 @@ if mode == "resort" {
 // It needs no source payload. Every rhyme row carries its own headword, so the
 // tail, the count and the phonemes can all be recomputed and compared in place.
 
-if mode == "verify" {
-    guard args.count >= 4 else { fatalError("usage: realpack verify <pack.dma> <en|fr>") }
+if mode == "conform" {
+    guard args.count >= 4 else { fatalError("usage: realpack conform <pack.dma> <en|fr>") }
     let language: Language = args[3] == "fr" ? .french : .english
     let v = try DMAVolume.open(url: URL(fileURLWithPath: args[2]),
                                keyProvider: EmbeddedSecretKeyProvider(secret: SEED))
