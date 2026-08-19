@@ -6,13 +6,53 @@ format, published as a release asset and resolved through [`manifest.json`](mani
 
 | pack | source | headwords | size | licence |
 | --- | --- | --- | --- | --- |
-| [`en-2.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/en-2.dma) | WordNet 3.1 | 147,478 | 9,497,278 B (9.1 MB) | [WordNet 3.1](LICENSE-WordNet-3.1.txt) |
+| [`en-3.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v3/en-3.dma) | WordNet 3.1 | 147,478 | 9,497,026 B (9.1 MB) | [WordNet 3.1](LICENSE-WordNet-3.1.txt) |
 | [`fr-2.dma`](https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/fr-2.dma) | French Wiktionary (Wiktionnaire), via [kaikki.org](https://kaikki.org/) | 1,931,709 | 97,174,119 B (92.7 MB) | [CC BY-SA 3.0](LICENSE-CC-BY-SA-3.0.txt) |
 
 ```
-SHA-256  42e27b7a423d20cb47f5f0bff540f215983081b5c6beb443247ea49a96f5ee69  en-2.dma
+SHA-256  b3d8a183aa149b5e303679d8a5f48ba4b957019b77386e522177889b59963367  en-3.dma
 SHA-256  7099135ec72d2615efc31ad4d207deb3574b0d4fca2c06d92218416318891876  fr-2.dma
 ```
+
+The French pack stays at revision 2; only English moved. Earlier revisions stay
+downloadable — `v1` and `v2` are not withdrawn — but `manifest.json` names the
+current one.
+
+## What changed in revision 3 (English)
+
+**The pack now agrees with the engine that reads it.** A pack keys its rhyme
+buckets on the phonetic tail computed at *build* time, so a fix to the
+transcriber puts the two out of step silently: `en-2` files `grey` and `prey`
+under `/rhyme/i.txt` — beside `city` and `money` — while a current reader asks
+for `/rhyme/eɪ.txt`. An editor would colour `grey` and `say` as a rhyme family
+while the lookup panel beside it offered neither for the other.
+
+Word-final `-ey` had no entry in the digraph table at all, so it fell through to
+`e` plus a final `y`: every such word came back a syllable long and took the
+wrong rhyme tail. Revision 3 is that fix, re-cut into the index.
+
+- **47 words change rhyme bucket.** `grey`, `prey`, `whey`, `bey`, `fey`, `ley`,
+  `ney`, `trey`, `drey` and eighteen `…-grey` compounds move from `/i/` to
+  `/eɪ/`; `key` moves from `/i/` to `/iː/`. The `/eɪ/` bucket grows from 936 rows
+  to 978.
+- **663 words get a corrected syllable count** — `valley` 3 → 2, `journey` 4 → 3,
+  `abbey` 3 → 2, and so on for every `-ey` word.
+- **Nothing else moved.** No headword is lost or gained, no frequency rank
+  changes, and every `/define/` block is byte-identical to revision 2. This is a
+  content revision: `layoutVersion` stays at `1`, so a pack and an app may still
+  be updated in either order.
+
+Checked the same way revision 2 was — with both packs in hand rather than by
+reasoning. The pack was also built from regenerated source against the
+*previous* engine first, and that build reproduced the published `en-2` byte for
+byte across all 2,717 data blocks, so the difference between the two published
+packs is the transcriber and nothing else.
+
+⚠️ **Do not compare packs with `shasum`.** The container writes a fresh GCM nonce
+per block, so two packs with identical plaintext have different file hashes;
+byte-equality has to be asked block by block through the archive reader. The
+hashes above identify *these files as published* — which is what a download
+should be checked against — and are not a way to compare two builds.
 
 ## What changed in revision 2
 

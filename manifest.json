@@ -3,9 +3,9 @@
   "packs": [
     {
       "language": "en",
-      "revision": 2,
-      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v2/en-2.dma",
-      "bytes": 9497278,
+      "revision": 3,
+      "url": "https://github.com/loic-rosset-ltd/lyrickit-packs/releases/download/v3/en-3.dma",
+      "bytes": 9497026,
       "seed": "lyrickit-pack-seed-v1-published-with-the-licence",
       "displayName": "English — WordNet 3.1",
       "headwords": 147478,
