@@ -224,6 +224,38 @@ ranked hits *and* the definitions, because those fail for different reasons: the
 first catches a lost or duplicated line, the second an ordering that is subtly not
 stable, the third a block that did not survive the pass-through.
 
+## Checking a pack against the engine that reads it
+
+A pack keys its rhyme buckets on the phonetic tail computed **when the pack is
+cut**. So a fix to the transcriber puts the pack and the reader out of step
+*silently* — which is exactly what revision 3 was for. No test suite can see it:
+the pack is data and a suite tests code.
+
+```sh
+realpack conform en-3.dma en          # every row re-derived and compared, in place
+realpack diff    en-2.dma en-3.dma    # what actually moved between two packs
+```
+
+`conform` needs no source payload — every rhyme row carries its own headword, so
+the bucket, the syllable count and the phonemes can all be recomputed and checked
+against what the pack stored. It reports four counters and exits non-zero unless
+all four are zero. **Run it after any change to the phonetics, and before
+publishing.**
+
+⚠️ It is deliberately *not* called `verify`: that name already belongs to the mode
+proving the rank-order short-circuit returns the same words as an exhaustive run,
+and a second `mode == "verify"` in the rig does not fail to compile — it silently
+makes the first unreachable.
+
+`diff` compares two packs block by block *as bytes* and their rhyme indexes *as
+structure*, so the finding is "these 47 words changed bucket", not "these blocks
+differ". ⚠️ **Do not reach for `shasum` here.** The container writes a fresh GCM
+nonce per block, so two packs with identical plaintext have different file hashes;
+byte-equality has to be asked through the archive reader. Equal file *sizes* are
+still a useful smoke test — the rebuild of `en-2` from regenerated source came
+back at 9,497,278 B, the published byte count, and then compared identical block
+for block.
+
 ## Publishing a new revision
 
 1. Build or resort the pack and record its **exact byte count**. A consumer checks
